@@ -1,7 +1,7 @@
 /*
 
 (c) 2018 Alex Mirtoff
-mailto: alex@mirtoff.ru
+mailto: alex@mirtoff.ru, amirtov@alfabank.ru
 
 */
 package main
@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	//"reflect"
 	. "github.com/adubkov/go-zabbix"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"
@@ -135,7 +134,7 @@ type ContainerStats struct {
 	} `json:"networks"`
 }
 
-// for []Slice of maps type, lol
+// Slice of maps type, lol
 type M map[string]string
 
 // Start here
@@ -160,7 +159,8 @@ func main() {
 	// New client
 	cli, err := client.NewEnvClient()
 	if err != nil {
-		panic(err)
+		log.Println(err)
+		os.Exit(1)
 	}
 
 	// Logging:
@@ -198,7 +198,7 @@ func startHttp(cli *client.Client, webPort string) {
 // Construct JSON reply for Zabbix discovery (containers list)
 func zabbixDiscoveryGenJSON(cli *client.Client) string {
 	var myMapSlice []M // use this for slicing the maps
-	for _, cnt := range getContainers(cli) {
+	for _, cnt := range getContainers(cli, false) {
 		tmpMap := make(map[string]string)
 		for id, name := range cnt {
 			//fmt.Println(name)
@@ -230,8 +230,23 @@ type prSl map[string]int
 func startDockerReqAgent(cli *client.Client, getStatsTimer int, zabbixServer string, zabbixPort int, zabbixHost string) {
 	for {
 		statsMap := make(map[string][]string)
-		c := getContainers(cli)
-		for _, cnt := range c {
+		cAll := getContainers(cli, true)
+		cCountAll := len(cAll)
+/*
+		for _, cnt := range cAll {
+			for k, _ := range cnt {
+				if checkStatus(cli, k) {
+					isRunMap[k] = 1
+				} else {
+					isRunMap[k] = 0
+				}
+				
+			}
+		}
+*/
+		cRun := getContainers(cli, false)
+		cCountRun := len(cRun)
+		for _, cnt := range cRun {
 			for k, _ := range cnt {
 				st := jsonMapGen(getStat(cli, k, false))
 				for l := range st {
@@ -245,29 +260,31 @@ func startDockerReqAgent(cli *client.Client, getStatsTimer int, zabbixServer str
 							strconv.Itoa(st[l].Networks.Eth0.RxBytes), strconv.Itoa(st[l].Networks.Eth0.RxPackets), strconv.Itoa(st[l].Networks.Eth0.RxErrors),
 							strconv.Itoa(st[l].Networks.Eth0.RxDropped), strconv.Itoa(st[l].Networks.Eth0.TxBytes), strconv.Itoa(st[l].Networks.Eth0.TxPackets),
 							strconv.Itoa(st[l].Networks.Eth0.TxErrors), strconv.Itoa(st[l].Networks.Eth0.TxDropped),
-						FloatToString(calcCPUPercent(st[l].CPUStats.CPUUsage.TotalUsage, st[l].CPUStats.SystemCPUUsage, st[l].PrecpuStats.CPUUsage.TotalUsage, st[l].PrecpuStats.SystemCPUUsage, st[l].CPUStats.CPUUsage.PercpuUsage)))
+							FloatToString(calcCPUPercent(st[l].CPUStats.CPUUsage.TotalUsage, st[l].CPUStats.SystemCPUUsage, st[l].PrecpuStats.CPUUsage.TotalUsage, st[l].PrecpuStats.SystemCPUUsage, st[l].CPUStats.CPUUsage.PercpuUsage)),
+						        strconv.FormatBool(checkStatus(cli, st[l].ID[:10])))
 					}
 				}
 
 			}
 		}
-		zabbixSend(statsMap, zabbixServer, zabbixPort, zabbixHost)
+		zabbixSend(statsMap, cCountAll, cCountRun, zabbixServer, zabbixPort, zabbixHost)
 		time.Sleep(time.Duration(getStatsTimer) * time.Second)
 	}
 
 }
 
+
 func FloatToString(input_num float64) string {
-    return strconv.FormatFloat(input_num, 'f', 6, 64)
+	return strconv.FormatFloat(input_num, 'f', 6, 64)
 }
 
 // Calculate CPU percentage
 func calcCPUPercent(currTotUserCPU int, currTotSysCPU int64, prevTotUserCPU int, prevTotSysCPU int64, percpuUsage []int) float64 {
-//	fmt.Println(currTotUserCPU, currTotSysCPU, prevTotUserCPU, prevTotSysCPU, percpuUsage)
+	//	fmt.Println(currTotUserCPU, currTotSysCPU, prevTotUserCPU, prevTotSysCPU, percpuUsage)
 
 	var (
-		cpuPercent = 0.0
-		cpuDelta = float64(currTotUserCPU) - float64(prevTotUserCPU)
+		cpuPercent  = 0.0
+		cpuDelta    = float64(currTotUserCPU) - float64(prevTotUserCPU)
 		systemDelta = float64(currTotSysCPU) - float64(prevTotSysCPU)
 	)
 
@@ -277,12 +294,12 @@ func calcCPUPercent(currTotUserCPU int, currTotSysCPU int64, prevTotUserCPU int,
 	return cpuPercent
 }
 
-
 // Get container's stat
 func getStat(cli *client.Client, cnt string, stream bool) string {
 	out, err := cli.ContainerStats(context.Background(), cnt, stream)
 	if err != nil {
-		panic(err)
+		log.Println(err)
+		os.Exit(1)
 	}
 
 	buf := new(bytes.Buffer)
@@ -292,21 +309,31 @@ func getStat(cli *client.Client, cnt string, stream bool) string {
 }
 
 // Get containters list
-func getContainers(cli *client.Client) map[int]map[string]string {
-
-	containers, err := cli.ContainerList(context.Background(), types.ContainerListOptions{})
-	if err != nil {
-		panic(err)
+func getContainers(cli *client.Client, all bool) map[int]map[string]string {
+	var tList types.ContainerListOptions
+	if all {
+		tList = types.ContainerListOptions{All: true}
+	} else {
+		tList = types.ContainerListOptions{}
 	}
 
+	containers, err := cli.ContainerList(context.Background(), tList)
+	ifErr(err)
 	var data = map[int]map[string]string{}
 	for id, cnt := range containers {
 		data[id] = make(map[string]string)
 		name := strings.Replace(cnt.Names[0], "/", "", -1)
 		data[id][cnt.ID[:10]] = name
 	}
-
 	return data
+}
+
+// err
+func ifErr(err error) {
+	if err != nil {
+		log.Println(err)
+		os.Exit(1)
+	}
 }
 
 // Check container status
@@ -331,15 +358,26 @@ func jsonMapGen(data string) []ContainerStats {
 
 // ** Zabbix Sender Section
 
-func zabbixSend(data map[string][]string, zabbixServer string, zabbixPort int, zabbixHost string) {
+func zabbixSend(data map[string][]string, cCountAll int, cCountRun int, zabbixServer string, zabbixPort int, zabbixHost string) {
 
 	var metrics []*Metric
+
 	for id, v := range data {
 		name := strings.Replace(v[0], "/", "", -1)
+
 		// Basic metrics
 		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.id[%v,%v]", id, name), id, time.Now().Unix()))
 		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.name[%v,%v]", id, name), name, time.Now().Unix()))
 		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.hostmachine[%s,%s]", id, name), zabbixHost, time.Now().Unix()))
+		
+		var r string
+		if v[24] == "true" {	
+			r = "1"
+		} else {
+			r = "0"
+		}
+		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.cont.run[%s,%s]", id, name), r, time.Now().Unix()))
+		
 		// CPU metrics
 		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.pidstats.current[%s,%s]", id, name), v[1], time.Now().Unix()))
 		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.cpustats.usage.total[%s,%s]", id, name), v[2], time.Now().Unix()))
@@ -370,6 +408,7 @@ func zabbixSend(data map[string][]string, zabbixServer string, zabbixPort int, z
 		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.eth0.txpackets[%s,%s]", id, name), v[20], time.Now().Unix()))
 		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.eth0.txerrors[%s,%s]", id, name), v[21], time.Now().Unix()))
 		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.eth0.txdropped[%s,%s]", id, name), v[22], time.Now().Unix()))
+
 	}
 	packet := NewPacket(metrics)
 	z := NewSender(zabbixServer, zabbixPort)
