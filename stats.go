@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	//"reflect"
 	. "github.com/adubkov/go-zabbix"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"
@@ -134,7 +135,6 @@ type ContainerStats struct {
 	} `json:"networks"`
 }
 
-// Slice of maps type, lol
 type M map[string]string
 
 // Start here
@@ -157,7 +157,7 @@ func main() {
 	webPort, err := cfg.String("web.port")
 
 	// New client
-	cli, err := client.NewEnvClient()
+	cli, err := client.NewClientWithOpts(client.WithVersion("1.37"))
 	if err != nil {
 		log.Println(err)
 		os.Exit(1)
@@ -175,6 +175,7 @@ func main() {
 	done := make(chan bool)
 	log.Println("Starting...")
 	go startHttp(cli, webPort)
+	go startOverview(cli,getStatsTimer, zabbixServer, zabbixPort, zabbixHost)
 	go startDockerReqAgent(cli, getStatsTimer, zabbixServer, zabbixPort, zabbixHost)
 	<-done
 }
@@ -187,18 +188,19 @@ func getVersion() {
 
 // HTTP Server goroutine
 func startHttp(cli *client.Client, webPort string) {
-
 	r := httprouter.New()
-	r.GET("/zabbix/containers/list", getIndexWithSettings(cli))
+	// тут странно, тру и фолс наоборот :)
+	r.GET("/zabbix/containers/list", getIndexWithSettings(cli, false))
+	r.GET("/zabbix/containers/listall", getIndexWithSettings(cli, true))
 	webPort = fmt.Sprintf(":%s", webPort)
 	http.ListenAndServe(webPort, r)
 
 }
 
 // Construct JSON reply for Zabbix discovery (containers list)
-func zabbixDiscoveryGenJSON(cli *client.Client) string {
+func zabbixDiscoveryGenJSON(cli *client.Client, ifRun bool) string {
 	var myMapSlice []M // use this for slicing the maps
-	for _, cnt := range getContainers(cli, false) {
+	for _, cnt := range getContainers(cli, ifRun) {
 		tmpMap := make(map[string]string)
 		for id, name := range cnt {
 			//fmt.Println(name)
@@ -213,14 +215,42 @@ func zabbixDiscoveryGenJSON(cli *client.Client) string {
 	return fmt.Sprintf("{\"data\":%s}", contStr)
 }
 
-// HTTP Handler
-func getIndexWithSettings(cli *client.Client) httprouter.Handle {
+// HTTP Handlers
+func getIndexWithSettings(cli *client.Client, ifRun bool) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
 		w.Header().Set("Content-Type", "application/json")
 		message := r.URL.Path
 		message = strings.TrimPrefix(message, "/")
-		message = zabbixDiscoveryGenJSON(cli)
+		message = zabbixDiscoveryGenJSON(cli, ifRun)
 		w.Write([]byte(message))
+	}
+}
+
+// start overviev data sender
+func startOverview(cli *client.Client, getStatsTimer int, zabbixServer string, zabbixPort int, zabbixHost string) {	
+	for {
+		var metrics []*Metric
+
+		cAll := getContainers(cli, true)
+		var ifRun int
+		for _, cMap := range cAll {
+			for id, name := range cMap {
+				if checkStatus(cli, id) {
+					ifRun = 1
+				} else {
+					ifRun = 0
+				}
+				// fmt.Printf("docker.table[%v,%v]", id, name)
+				// fmt.Println(ifRun)
+				metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.table[%v,%v]", id, name), strconv.Itoa(ifRun), time.Now().Unix()))
+			}
+		}
+		packet := NewPacket(metrics)
+		z := NewSender(zabbixServer, zabbixPort)
+		z.Send(packet)
+		// fmt.Println(metrics)
+		log.Println("SEND: packet sent zo zabbix")
+		time.Sleep(time.Duration(getStatsTimer) * time.Second)
 	}
 }
 
@@ -229,23 +259,17 @@ type prSl map[string]int
 // Docker Request info goroutine
 func startDockerReqAgent(cli *client.Client, getStatsTimer int, zabbixServer string, zabbixPort int, zabbixHost string) {
 	for {
+		// Инициализация карты массивов строк для заполнения параметрами для Zabbix
 		statsMap := make(map[string][]string)
+		// Список всех контейнеров
 		cAll := getContainers(cli, true)
 		cCountAll := len(cAll)
-/*
-		for _, cnt := range cAll {
-			for k, _ := range cnt {
-				if checkStatus(cli, k) {
-					isRunMap[k] = 1
-				} else {
-					isRunMap[k] = 0
-				}
-				
-			}
-		}
-*/
+
+		// Список запущенных контейнеров
 		cRun := getContainers(cli, false)
 		cCountRun := len(cRun)
+
+		// Основной цикл среди запущенных контейнеров
 		for _, cnt := range cRun {
 			for k, _ := range cnt {
 				st := jsonMapGen(getStat(cli, k, false))
@@ -325,6 +349,7 @@ func getContainers(cli *client.Client, all bool) map[int]map[string]string {
 		name := strings.Replace(cnt.Names[0], "/", "", -1)
 		data[id][cnt.ID[:10]] = name
 	}
+	//fmt.Println(data)
 	return data
 }
 
@@ -366,6 +391,7 @@ func zabbixSend(data map[string][]string, cCountAll int, cCountRun int, zabbixSe
 		name := strings.Replace(v[0], "/", "", -1)
 
 		// Basic metrics
+		//fmt.Println(cCountRun)
 		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.id[%v,%v]", id, name), id, time.Now().Unix()))
 		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.name[%v,%v]", id, name), name, time.Now().Unix()))
 		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.hostmachine[%s,%s]", id, name), zabbixHost, time.Now().Unix()))
