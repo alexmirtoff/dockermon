@@ -121,21 +121,21 @@ type ContainerStats struct {
 	} `json:"memory_stats"`
 	Name     string `json:"name"`
 	ID       string `json:"id"`
-	Networks struct {
-		Eth0 struct {
-			RxBytes   int `json:"rx_bytes"`
-			RxPackets int `json:"rx_packets"`
-			RxErrors  int `json:"rx_errors"`
-			RxDropped int `json:"rx_dropped"`
-			TxBytes   int `json:"tx_bytes"`
-			TxPackets int `json:"tx_packets"`
-			TxErrors  int `json:"tx_errors"`
-			TxDropped int `json:"tx_dropped"`
-		} `json:"eth0"`
-	} `json:"networks"`
+	// Networks struct {
+	// 	Eth0 struct {
+	// 		RxBytes   int `json:"rx_bytes"`
+	// 		RxPackets int `json:"rx_packets"`
+	// 		RxErrors  int `json:"rx_errors"`
+	// 		RxDropped int `json:"rx_dropped"`
+	// 		TxBytes   int `json:"tx_bytes"`
+	// 		TxPackets int `json:"tx_packets"`
+	// 		TxErrors  int `json:"tx_errors"`
+	// 		TxDropped int `json:"tx_dropped"`
+	// 	} `json:"eth0"`
+	// } `json:"networks"`
+	// Описываем динамический механимз получения интерфейсов
+	Networks map[string]map[string]int64
 }
-
-type M map[string]string
 
 // Start here
 func main() {
@@ -192,10 +192,13 @@ func startHttp(cli *client.Client, webPort string) {
 	// тут странно, тру и фолс наоборот :)
 	r.GET("/zabbix/containers/list", getIndexWithSettings(cli, false))
 	r.GET("/zabbix/containers/listall", getIndexWithSettings(cli, true))
+	r.GET("/zabbix/containers/networks", getEthernetWithSettings(cli, false))
 	webPort = fmt.Sprintf(":%s", webPort)
 	http.ListenAndServe(webPort, r)
 
 }
+
+type M map[string]string
 
 // Construct JSON reply for Zabbix discovery (containers list)
 func zabbixDiscoveryGenJSON(cli *client.Client, ifRun bool) string {
@@ -215,7 +218,37 @@ func zabbixDiscoveryGenJSON(cli *client.Client, ifRun bool) string {
 	return fmt.Sprintf("{\"data\":%s}", contStr)
 }
 
-// HTTP Handlers
+type S map[string]map[string]string
+
+// Construct JSON reply for Zabbix discovery (ethernet interfaces)
+func zabbixDiscoveryGenJSONEthernet(cli *client.Client, ifRun bool) string {
+	var count int = 1
+	var stroka string
+	for _, cnt := range getContainers(cli, ifRun) {
+		tmpMap := make(map[string]string)
+		for topId, _ := range cnt {
+			st := jsonMapGen(getStat(cli, topId, false))
+			for idMid, values := range st {
+				cntName := strings.Replace(st[idMid].Name, "/", "", -1)
+				
+				tmpMap["{#CONTNAME}"] = cntName
+				tmpMap["{#CONTID}"] = topId
+
+				for intName, _ := range values.Networks {
+					if count == 0 {
+						stroka = stroka + ","
+					}
+					count = 0
+					tmpMap["{#INTERFACE}"] = intName
+					stroka += fmt.Sprintf("{\"{#CONTID}\":\"%s\",\"{#CONTNAME}\":\"%s\",\"{#INTERFACE}\":\"%s\"}", topId, cntName, intName)
+				}
+			} 
+		}
+	}
+	return fmt.Sprintf("{\"data\":[%s]}", stroka)
+}
+
+// HTTP Handlers (list, listall)
 func getIndexWithSettings(cli *client.Client, ifRun bool) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
 		w.Header().Set("Content-Type", "application/json")
@@ -226,6 +259,16 @@ func getIndexWithSettings(cli *client.Client, ifRun bool) httprouter.Handle {
 	}
 }
 
+// HTTP Handlers (Ethernet interfaces)
+func getEthernetWithSettings(cli *client.Client, ifRun bool) httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+		w.Header().Set("Content-Type", "application/json")
+		message := r.URL.Path
+		message = strings.TrimPrefix(message, "/")
+		message = zabbixDiscoveryGenJSONEthernet(cli, ifRun)
+		w.Write([]byte(message))
+	}
+}
 // start overviev data sender
 func startOverview(cli *client.Client, getStatsTimer int, zabbixServer string, zabbixPort int, zabbixHost string) {	
 	for {
@@ -260,7 +303,10 @@ type prSl map[string]int
 func startDockerReqAgent(cli *client.Client, getStatsTimer int, zabbixServer string, zabbixPort int, zabbixHost string) {
 	for {
 		// Инициализация карты массивов строк для заполнения параметрами для Zabbix
-		statsMap := make(map[string][]string)
+		// statsMap := make(map[string][]string)
+		statsMap := make(map[string][]map[string]string)
+		statsNetworkMap := make(map[string][]map[string]map[string]string)
+
 		// Список всех контейнеров
 		cAll := getContainers(cli, true)
 		cCountAll := len(cAll)
@@ -276,27 +322,76 @@ func startDockerReqAgent(cli *client.Client, getStatsTimer int, zabbixServer str
 				for l := range st {
 					log.Printf("GET: %v", st)
 					if checkStatus(cli, st[l].ID[:10]) {
-						statsMap[st[l].ID[:10]] = append(statsMap[st[l].ID[:10]], st[l].Name, strconv.Itoa(st[l].PidsStats.Current), strconv.Itoa(st[l].CPUStats.CPUUsage.TotalUsage),
-							strconv.FormatInt(st[l].CPUStats.SystemCPUUsage, 10), strconv.Itoa(st[l].MemoryStats.Usage), strconv.Itoa(st[l].MemoryStats.MaxUsage),
-							strconv.Itoa(st[l].MemoryStats.Stats.ActiveAnon), strconv.Itoa(st[l].MemoryStats.Stats.Cache), strconv.Itoa(st[l].MemoryStats.Stats.InactiveAnon),
-							strconv.Itoa(st[l].MemoryStats.Stats.Rss), strconv.Itoa(st[l].MemoryStats.Stats.Swap), strconv.Itoa(st[l].MemoryStats.Stats.TotalActiveAnon),
-							strconv.Itoa(st[l].MemoryStats.Stats.TotalInactiveAnon), strconv.Itoa(st[l].MemoryStats.Stats.TotalRss), strconv.Itoa(st[l].MemoryStats.Limit),
-							strconv.Itoa(st[l].Networks.Eth0.RxBytes), strconv.Itoa(st[l].Networks.Eth0.RxPackets), strconv.Itoa(st[l].Networks.Eth0.RxErrors),
-							strconv.Itoa(st[l].Networks.Eth0.RxDropped), strconv.Itoa(st[l].Networks.Eth0.TxBytes), strconv.Itoa(st[l].Networks.Eth0.TxPackets),
-							strconv.Itoa(st[l].Networks.Eth0.TxErrors), strconv.Itoa(st[l].Networks.Eth0.TxDropped),
-							FloatToString(calcCPUPercent(st[l].CPUStats.CPUUsage.TotalUsage, st[l].CPUStats.SystemCPUUsage, st[l].PrecpuStats.CPUUsage.TotalUsage, st[l].PrecpuStats.SystemCPUUsage, st[l].CPUStats.CPUUsage.PercpuUsage)),
-						        strconv.FormatBool(checkStatus(cli, st[l].ID[:10])))
-					}
-				}
+						// temporary maps
+						tmpStats := make(map[string]string)
+						ethTmpValues := make(map[string]string)
+						ethIntTmpNames := make(map[string]map[string]string)
+						// statsMap[st[l].ID[:10]] = append(statsMap[st[l].ID[:10]], st[l].Name)
+						tmpStats["ID"] = st[l].ID[:10]
+						tmpStats["Name"] = st[l].Name
+						tmpStats["PidsStatsCurrent"] = strconv.Itoa(st[l].PidsStats.Current)
+						tmpStats["CPUStatsCPUUsageTotalUsage"] = strconv.Itoa(st[l].CPUStats.CPUUsage.TotalUsage)
+						tmpStats["CPUStatsSystemCPUUsage"] = strconv.FormatInt(st[l].CPUStats.SystemCPUUsage, 10)
+						tmpStats["MemoryStatsUsage"] = strconv.Itoa(st[l].MemoryStats.Usage)
+						tmpStats["MemoryStatsMaxUsage"] = strconv.Itoa(st[l].MemoryStats.MaxUsage)
+						tmpStats["MemoryStatsActiveAnon"] = strconv.Itoa(st[l].MemoryStats.Stats.ActiveAnon)
+						tmpStats["MemoryStatsStatsCache"] = strconv.Itoa(st[l].MemoryStats.Stats.Cache)
+						tmpStats["MemoryStatsStatsInactiveAnon"] = strconv.Itoa(st[l].MemoryStats.Stats.InactiveAnon)
+						tmpStats["MemoryStatsStatsRss"] = strconv.Itoa(st[l].MemoryStats.Stats.Rss)
+						tmpStats["MemoryStatsStatsSwap"] = strconv.Itoa(st[l].MemoryStats.Stats.Swap)
+						tmpStats["MemoryStatsStatsTotalActiveAnon"] = strconv.Itoa(st[l].MemoryStats.Stats.TotalActiveAnon)
+						tmpStats["MemoryStatsStatsTotalInactiveAnon"] = strconv.Itoa(st[l].MemoryStats.Stats.TotalInactiveAnon)
+						tmpStats["MemoryStatsStatsTotalRss"] = strconv.Itoa(st[l].MemoryStats.Stats.TotalRss)
+						tmpStats["MemoryStatsLimit"] = strconv.Itoa(st[l].MemoryStats.Limit)
+						tmpStats["CPUPercentage"] = FloatToString(calcCPUPercent(st[l].CPUStats.CPUUsage.TotalUsage,
+													 st[l].CPUStats.SystemCPUUsage, st[l].PrecpuStats.CPUUsage.TotalUsage,
+													 st[l].PrecpuStats.SystemCPUUsage, st[l].CPUStats.CPUUsage.PercpuUsage))
+						tmpStats["ContainerStatus"] = strconv.FormatBool(checkStatus(cli, st[l].ID[:10]))
+						// Network dynamic interfaces
+						for ethIntName, ethIntField := range st[l].Networks {
+							// rx
+							ethTmpValues["rx_bytes"] = strconv.FormatInt(ethIntField["rx_bytes"], 10)
+							ethTmpValues["rx_packets"] = strconv.FormatInt(ethIntField["rx_packets"], 10)
+							ethTmpValues["rx_errors"] = strconv.FormatInt(ethIntField["rx_errors"], 10)
+							ethTmpValues["rx_dropped"] = strconv.FormatInt(ethIntField["rx_dropped"], 10)
+							// tx
+							ethTmpValues["tx_bytes"] = strconv.FormatInt(ethIntField["tx_bytes"], 10)
+							ethTmpValues["tx_packets"] = strconv.FormatInt(ethIntField["tx_packets"], 10)
+							ethTmpValues["tx_error"] = strconv.FormatInt(ethIntField["tx_error"], 10)
+							ethTmpValues["tx_dropped"] = strconv.FormatInt(ethIntField["tx_dropped"], 10)
 
+							ethTmpValues["name"] = strings.Replace(st[l].Name, "/", "", -1)
+							
+							ethIntTmpNames[ethIntName] = ethTmpValues
+						}
+						// put network interfaces data into slice of networks maps (top level)
+						statsNetworkMap[st[l].ID[:10]] = append(statsNetworkMap[st[l].ID[:10]], ethIntTmpNames)
+						// put temporary map into slice of maps (top level)
+						statsMap[st[l].ID[:10]] = append(statsMap[st[l].ID[:10]], tmpStats)
+					}		
+				}
 			}
 		}
-		zabbixSend(statsMap, cCountAll, cCountRun, zabbixServer, zabbixPort, zabbixHost)
+		// getNetInterfaces(cli)
+		zabbixSend(statsMap, statsNetworkMap, cCountAll, cCountRun, zabbixServer, zabbixPort, zabbixHost)
 		time.Sleep(time.Duration(getStatsTimer) * time.Second)
 	}
-
 }
 
+// Network interfaces discovery
+// Для сетей требуется отдельный механизм, так как это динамичные данные
+func getNetInterfaces(cli *client.Client) {
+	cRun := getContainers(cli, false)
+	for _, cnt := range cRun {
+		for k, _ := range cnt {
+			st := jsonMapGen(getStat(cli, k, false))
+			for a, b := range st {
+				cntName := strings.Replace(st[a].Name, "/", "", -1)
+				fmt.Println(k, cntName, b.Networks)
+			}
+		} 
+	}
+}
 
 func FloatToString(input_num float64) string {
 	return strconv.FormatFloat(input_num, 'f', 6, 64)
@@ -383,59 +478,61 @@ func jsonMapGen(data string) []ContainerStats {
 
 // ** Zabbix Sender Section
 
-func zabbixSend(data map[string][]string, cCountAll int, cCountRun int, zabbixServer string, zabbixPort int, zabbixHost string) {
+func zabbixSend(data map[string][]map[string]string, netData map[string][]map[string]map[string]string, cCountAll int, cCountRun int, zabbixServer string, zabbixPort int, zabbixHost string) {
 
 	var metrics []*Metric
 
-	for id, v := range data {
-		name := strings.Replace(v[0], "/", "", -1)
+	for containerID, mapValues := range data {
+		for _, values := range mapValues {
+			// need to correct name
+			containerName := strings.Replace(values["Name"], "/", "", -1)
 
-		// Basic metrics
-		//fmt.Println(cCountRun)
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.id[%v,%v]", id, name), id, time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.name[%v,%v]", id, name), name, time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.hostmachine[%s,%s]", id, name), zabbixHost, time.Now().Unix()))
-		
-		var r string
-		if v[24] == "true" {	
-			r = "1"
-		} else {
-			r = "0"
+			// Basic metrics
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.id[%v,%v]", containerID, containerName), containerID, time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.name[%v,%v]", containerID, containerName), containerName, time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.hostmachine[%s,%s]", containerID, containerName), zabbixHost, time.Now().Unix()))
+			
+			// CPU metrics
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.pidstats.current[%s,%s]", containerID, containerName), values["PidsStatsCurrent"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.cpustats.usage.total[%s,%s]", containerID, containerName), values["CPUStatsCPUUsageTotalUsage"], time.Now().Unix()))      
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.cpustats.system[%s,%s]", containerID, containerName), values["CPUStatsSystemCPUUsage"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.cpustats.percent[%s,%s]", containerID, containerName), values["CPUPercentage"], time.Now().Unix()))
+
+			// // Memory metrics
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.usage[%s,%s]", containerID, containerName), values["MemoryStatsUsage"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.maxusage[%s,%s]", containerID, containerName), values["MemoryStatsMaxUsage"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.stats.active[%s,%s]", containerID, containerName), values["MemoryStatsActiveAnon"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.stats.cache[%s,%s]", containerID, containerName), values["MemoryStatsStatsCache"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.stats.inactive[%s,%s]", containerID, containerName), values["MemoryStatsStatsInactiveAnon"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.stats.rss[%s,%s]", containerID, containerName), values["MemoryStatsStatsRss"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.stats.swap[%s,%s]", containerID, containerName), values["MemoryStatsStatsSwap"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.stats.totalactive[%s,%s]", containerID, containerName), values["MemoryStatsStatsTotalActiveAnon"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.stats.totalinactive[%s,%s]", containerID, containerName), values["MemoryStatsStatsTotalInactiveAnon"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.stats.totalrss[%s,%s]", containerID, containerName), values["MemoryStatsStatsTotalRss"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.limit[%s,%s]", containerID, containerName), values["MemoryStatsLimit"], time.Now().Unix()))
+
 		}
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.cont.run[%s,%s]", id, name), r, time.Now().Unix()))
-		
-		// CPU metrics
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.pidstats.current[%s,%s]", id, name), v[1], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.cpustats.usage.total[%s,%s]", id, name), v[2], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.cpustats.system[%s,%s]", id, name), v[3], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.cpustats.percent[%s,%s]", id, name), v[23], time.Now().Unix()))
-
-		// Memory metrics
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.usage[%s,%s]", id, name), v[4], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.maxusage[%s,%s]", id, name), v[5], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.stats.active[%s,%s]", id, name), v[6], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.stats.cache[%s,%s]", id, name), v[7], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.stats.inactive[%s,%s]", id, name), v[8], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.stats.rss[%s,%s]", id, name), v[9], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.stats.swap[%s,%s]", id, name), v[10], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.stats.totalactive[%s,%s]", id, name), v[11], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.stats.totalinactive[%s,%s]", id, name), v[12], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.stats.totalrss[%s,%s]", id, name), v[13], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.memorystats.limit[%s,%s]", id, name), v[14], time.Now().Unix()))
-
-		// Network metrics rx
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.eth0.rxbytes[%s,%s]", id, name), v[15], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.eth0.rxpackets[%s,%s]", id, name), v[16], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.eth0.rxerrors[%s,%s]", id, name), v[17], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.newtorks.eth0.rxdropped[%s,%s]", id, name), v[18], time.Now().Unix()))
-
-		// Network metrics tx
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.eth0.txbytes[%s,%s]", id, name), v[19], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.eth0.txpackets[%s,%s]", id, name), v[20], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.eth0.txerrors[%s,%s]", id, name), v[21], time.Now().Unix()))
-		metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.eth0.txdropped[%s,%s]", id, name), v[22], time.Now().Unix()))
-
 	}
+
+	// Iterate ethernet interfaces
+	for containerID, valsTop := range netData {
+		for _, valsMid  := range valsTop {
+			for ethName, value := range valsMid {	
+			// Network metrics rx
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.rxbytes[%s,%s,%s]", containerID, value["name"], ethName), value["rx_bytes"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.rxpackets[%s,%s,%s]", containerID, value["name"], ethName), value["rx_packets"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.rxerrors[%s,%s,%s]", containerID, value["name"], ethName), value["rx_errors"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.newtorks.rxdropped[%s,%s,%s]", containerID, value["name"], ethName), value["rx_dropped"], time.Now().Unix()))
+
+			// Network metrics tx
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.txbytes[%s,%s,%s]", containerID, value["name"], ethName), value["tx_bytes"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.txpackets[%s,%s,%s]", containerID, value["name"], ethName), value["tx_packets"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.txerrors[%s,%s,%s]", containerID, value["name"], ethName), value["tx_errors"], time.Now().Unix()))
+			metrics = append(metrics, NewMetric(zabbixHost, fmt.Sprintf("docker.networks.txdropped[%s,%s,%s]", containerID, value["name"], ethName), value["tx_dropped"], time.Now().Unix()))
+			}
+		}
+	}
+
 	packet := NewPacket(metrics)
 	z := NewSender(zabbixServer, zabbixPort)
 	z.Send(packet)
