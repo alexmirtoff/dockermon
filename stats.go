@@ -357,7 +357,7 @@ func startDockerReqAgent(cli *client.Client, getStatsTimer int, zabbixServer str
 							// tx
 							ethTmpValues["tx_bytes"] = strconv.FormatInt(ethIntField["tx_bytes"], 10)
 							ethTmpValues["tx_packets"] = strconv.FormatInt(ethIntField["tx_packets"], 10)
-							ethTmpValues["tx_error"] = strconv.FormatInt(ethIntField["tx_error"], 10)
+							ethTmpValues["tx_errors"] = strconv.FormatInt(ethIntField["tx_errors"], 10)
 							ethTmpValues["tx_dropped"] = strconv.FormatInt(ethIntField["tx_dropped"], 10)
 
 							ethTmpValues["name"] = strings.Replace(st[l].Name, "/", "", -1)
